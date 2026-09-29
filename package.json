@@ -8,7 +8,7 @@
 		"build": "tsc --noEmit && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
-	"author": "Quillan Favey",
+	"author": "daggermaster3000",
 	"license": "MIT",
 	"type": "commonjs",
 	"devDependencies": {
