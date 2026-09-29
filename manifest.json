@@ -1,0 +1,10 @@
+{
+	"id": "note-site-builder",
+	"name": "Note Site Builder",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.0",
+	"description": "Turn a note into a clean single-page website and PDF, with a contents rail, numbered figures and live preview.",
+	"author": "Quillan Favey",
+	"authorUrl": "https://github.com/daggermaster3000",
+	"isDesktopOnly": true
+}
