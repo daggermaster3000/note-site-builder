@@ -11,8 +11,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { pathToFileURL } from "url";
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const electron = require("electron");
+import { electron } from "./electron";
 
 /** Wait for web fonts and KaTeX to settle before printing. */
 const SETTLE = `
@@ -29,7 +28,7 @@ export async function printToPdf(page: string, out: string): Promise<void> {
 		try {
 			await win.loadURL(pathToFileURL(page).href);
 			await win.webContents.executeJavaScript(SETTLE);
-			const data: Uint8Array = await win.webContents.printToPDF({
+			const data = await win.webContents.printToPDF({
 				printBackground: true,
 				preferCSSPageSize: true,
 				generateDocumentOutline: true,
@@ -79,13 +78,13 @@ function chromePdf(chrome: string, page: string, out: string, timeout = 120000):
 		let lastSize = -1;
 		let stableSince = Date.now();
 		const finish = (err?: Error) => {
-			clearInterval(timer);
+			window.clearInterval(timer);
 			if (proc.exitCode === null) proc.kill("SIGKILL");
 			const ok = fs.existsSync(out) && fs.statSync(out).size > 0;
 			if (err || !ok) reject(err || new Error("Chrome produced no PDF"));
 			else resolve();
 		};
-		const timer = setInterval(() => {
+		const timer = window.setInterval(() => {
 			if (Date.now() - started > timeout) return finish(new Error("Chrome timed out printing"));
 			const size = fs.existsSync(out) ? fs.statSync(out).size : -1;
 			if (size > 0 && size === lastSize) {

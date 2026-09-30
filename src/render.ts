@@ -354,7 +354,7 @@ class Renderer {
 
 	/** An image embedded mid-sentence stays inline, without a figure. */
 	private inlineEmbeds(line: string): string {
-		return line.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (whole, name: string, pipe = "") => {
+		return line.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (_whole, name: string, pipe: string = "") => {
 			if (!this.isImage(name.trim())) return "";
 			const src = this.image(name.trim());
 			if (src === null) return "";
@@ -463,7 +463,7 @@ class Renderer {
 	render(): RenderResult {
 		const { meta, body } = splitFrontmatter(this.opts.markdown);
 		const title = meta.title || this.opts.fallbackTitle;
-		let html = this.marked.parse(this.preprocess(body), { async: false }) as string;
+		let html = this.marked.parse(this.preprocess(body), { async: false });
 		let { content, toc } = this.sections(html);
 		content = this.restoreMath(content);
 		// Wide tables scroll inside their own box rather than pushing the page out.

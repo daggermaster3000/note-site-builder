@@ -202,9 +202,10 @@ export class SetupModal extends Modal {
 				for (const n of notes) d.addOption(n.path, n.basename);
 				d.setValue(this.home).onChange((v) => {
 					this.home = v;
-					const fm = v === NEW ? null : this.app.metadataCache.getFileCache(this.app.vault.getAbstractFileByPath(v) as TFile)?.frontmatter;
-					if (fm) {
-						this.title = typeof fm.title === "string" ? fm.title : (this.app.vault.getAbstractFileByPath(v) as TFile).basename;
+					const note = v === NEW ? null : this.app.vault.getAbstractFileByPath(v);
+					const fm = note instanceof TFile ? this.app.metadataCache.getFileCache(note)?.frontmatter : null;
+					if (note instanceof TFile && fm) {
+						this.title = typeof fm.title === "string" ? fm.title : note.basename;
 						this.eyebrow = typeof fm.eyebrow === "string" ? fm.eyebrow : "";
 						this.subtitle = typeof fm.subtitle === "string" ? fm.subtitle : "";
 					}
@@ -217,8 +218,8 @@ export class SetupModal extends Modal {
 
 		new Setting(el).setName("Title").setDesc("The big heading at the top of the page.")
 			.addText((t) => t.setValue(this.title).onChange((v) => (this.title = v)));
-		new Setting(el).setName("Line above the title").setDesc("Optional, e.g. a course code and year.")
-			.addText((t) => t.setValue(this.eyebrow).setPlaceholder("BIO321 · Autumn 2026").onChange((v) => (this.eyebrow = v)));
+		new Setting(el).setName("Line above the title").setDesc("Optional. For example, the course and year.")
+			.addText((t) => t.setValue(this.eyebrow).setPlaceholder("Course name · year").onChange((v) => (this.eyebrow = v)));
 		new Setting(el).setName("Subtitle").setDesc("Optional, one sentence under the title.")
 			.addText((t) => t.setValue(this.subtitle).onChange((v) => (this.subtitle = v)));
 		new Setting(el)
@@ -327,17 +328,19 @@ export class SetupModal extends Modal {
 			if (vault.getAbstractFileByPath(file)) return this.fail(`“${file}” already exists. Pick it from the list instead, or choose another name.`);
 			home = await vault.create(file, starter(this.multi));
 		} else {
-			home = vault.getAbstractFileByPath(this.home) as TFile;
+			const picked = vault.getAbstractFileByPath(this.home);
+			if (!(picked instanceof TFile)) return this.fail(`“${this.home}” no longer exists.`);
+			home = picked;
 		}
 		// Only one home note per folder.
 		if (this.multi) {
 			for (const other of this.notes()) {
 				if (other !== home && this.app.metadataCache.getFileCache(other)?.frontmatter?.["site-home"] === true) {
-					await this.app.fileManager.processFrontMatter(other, (fm) => delete fm["site-home"]);
+					await this.app.fileManager.processFrontMatter(other, (fm: Record<string, unknown>) => delete fm["site-home"]);
 				}
 			}
 		}
-		await this.app.fileManager.processFrontMatter(home, (fm) => {
+		await this.app.fileManager.processFrontMatter(home, (fm: Record<string, unknown>) => {
 			const set = (key: string, value: string) => (value.trim() ? (fm[key] = value.trim()) : delete fm[key]);
 			set("title", this.title === home.basename ? "" : this.title);
 			set("eyebrow", this.eyebrow);
@@ -366,7 +369,7 @@ export class SetupModal extends Modal {
 
 		if (!this.github) {
 			new Notice(`Website set up: ${built.files.size} page${built.files.size === 1 ? "" : "s"} in ${out}/.`, 6000);
-			this.plugin.openSite(home);
+			void this.plugin.openSite(home);
 			return true;
 		}
 
@@ -374,7 +377,7 @@ export class SetupModal extends Modal {
 		const progress = new Notice("Setting up GitHub Pages…", 0);
 		try {
 			const folderAbs = this.plugin.abs(base);
-			let root = this.repo.root;
+			let root: string | null = this.repo.root;
 			if (!root) {
 				const init = await git(folderAbs, "init", "-b", "main");
 				if (!init.ok) return this.fail(`git init failed: ${init.stderr}`);
@@ -408,13 +411,13 @@ export class SetupModal extends Modal {
 
 			if (!this.publishNow) {
 				progress.hide();
-				new Notice("Website set up. Run “Publish with git” when you're ready to put it online.", 8000);
+				new Notice("Website set up. Run “Publish with Git” when you're ready to put it online.", 8000);
 				return true;
 			}
 
 			// 4. First publish: the site's notes, the built site and the workflow.
 			const paths = [...built.site.pages.map((p) => p.path), out]
-				.map((p) => path.relative(root!, path.join(vaultRoot, p)).split(path.sep).join("/"))
+				.map((p) => path.relative(root, path.join(vaultRoot, p)).split(path.sep).join("/"))
 				.concat(written);
 			for (const step of [["add", "-A", "--", ...paths], ["commit", "-m", "Set up website", "--", ...paths]]) {
 				const res = await git(root, ...step);
@@ -435,7 +438,7 @@ export class SetupModal extends Modal {
 			const settings = `https://github.com/${slug}/settings/pages`;
 			let pagesOn = false;
 			if (this.gh && this.ghUser && slug) {
-				const api = (method: string) => run(this.gh!, ["api", "-X", method, `repos/${slug}/pages`, "-f", "build_type=workflow"], root!);
+				const api = (method: string) => run(this.gh!, ["api", "-X", method, `repos/${slug}/pages`, "-f", "build_type=workflow"], root);
 				pagesOn = (await api("POST")).ok || (await api("PUT")).ok;
 				if (pagesOn) await run(this.gh, ["workflow", "run", "pages.yml", "--ref", this.repo.branch], root);
 			}

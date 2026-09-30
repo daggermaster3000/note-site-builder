@@ -12,6 +12,7 @@ import { LaserSuggest, laserLivePreview, laserPostProcessor } from "./laser-edit
 import { SetupModal } from "./setup";
 import { autoExport, drawingSvg, isDrawing } from "./excalidraw";
 import { SITES_VIEW, SitesView } from "./sites-view";
+import { electron } from "./electron";
 
 interface Settings {
 	outputFolder: string;
@@ -81,7 +82,7 @@ export default class NoteSiteBuilder extends Plugin {
 	} | null = null;
 
 	async onload() {
-		this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+		this.settings = Object.assign({}, DEFAULTS, (await this.loadData()) as Partial<Settings> | null);
 		this.settings.publishFolders = { ...this.settings.publishFolders };
 
 		this.statusEl = this.addStatusBarItem();
@@ -102,7 +103,7 @@ export default class NoteSiteBuilder extends Plugin {
 		this.addCommand({ id: "preview", name: "Start or stop live preview", callback: () => this.togglePreview() });
 		this.addCommand({ id: "open", name: "Open built website", checkCallback: withNote((n) => this.openSite(n)) });
 		this.addCommand({ id: "open-pdf", name: "Open built PDF", checkCallback: withNote((n) => this.openPdf(n)) });
-		this.addCommand({ id: "publish", name: "Publish with git (commit and push)", checkCallback: withNote((n) => this.publish(n)) });
+		this.addCommand({ id: "publish", name: "Publish with Git (commit and push)", checkCallback: withNote((n) => this.publish(n)) });
 		this.addCommand({ id: "open-published", name: "Open published website (GitHub Pages)", checkCallback: withNote((n) => this.openPublished(n)) });
 
 		this.addCommand({ id: "setup", name: "Set up a new website…", callback: () => this.setup() });
@@ -200,7 +201,8 @@ export default class NoteSiteBuilder extends Plugin {
 	}
 
 	private multiSite(home: TFile): Site {
-		const root = home.parent as TFolder;
+		const root = home.parent;
+		if (!root) throw new Error(`“${home.path}” has no folder.`);
 		const folder = this.outputFolder(home);
 		const pages: TFile[] = [];
 		const walk = (dir: TFolder) => {
@@ -286,7 +288,7 @@ export default class NoteSiteBuilder extends Plugin {
 		const leaf = existing ?? this.app.workspace.getRightLeaf(false);
 		if (!leaf) return;
 		if (!existing) await leaf.setViewState({ type: SITES_VIEW, active: true });
-		this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
 	}
 
 	private refreshStatus() {
@@ -311,7 +313,7 @@ export default class NoteSiteBuilder extends Plugin {
 		item("Open built website", "globe", () => note && this.openSite(note), !!note);
 		item("Open built PDF", "file-text", () => note && this.openPdf(note), !!note);
 		menu.addSeparator();
-		item("Publish with git…", "upload-cloud", () => note && this.publish(note), !!note);
+		item("Publish with Git…", "upload-cloud", () => note && this.publish(note), !!note);
 		item("Open published website", "external-link", () => note && this.openPublished(note), !!note);
 		menu.addSeparator();
 		item("Set up a new website…", "folder-plus", () => this.setup());
@@ -320,10 +322,9 @@ export default class NoteSiteBuilder extends Plugin {
 	}
 
 	open(target: string) {
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const { shell } = require("electron");
-		if (/^https?:/.test(target)) shell.openExternal(target);
-		else shell.openPath(target);
+		const { shell } = electron;
+		if (/^https?:/.test(target)) void shell.openExternal(target);
+		else void shell.openPath(target);
 	}
 
 	// ---------- building ----------
@@ -587,7 +588,7 @@ export default class NoteSiteBuilder extends Plugin {
 			(file instanceof TFile && file.extension === "md" && (inRoot(file.path) || (oldPath !== undefined && inRoot(oldPath))));
 		if (!relevant) return;
 		window.clearTimeout(p.timer);
-		p.timer = window.setTimeout(async () => {
+		p.timer = window.setTimeout(() => void (async () => {
 			if (this.preview !== p) return;
 			try {
 				const home = this.app.vault.getAbstractFileByPath(p.built.site.home.path);
@@ -597,7 +598,7 @@ export default class NoteSiteBuilder extends Plugin {
 			} catch (err) {
 				new Notice(`Preview rebuild failed: ${(err as Error).message}`, 8000);
 			}
-		}, 400);
+		})(), 400);
 	}
 
 	stopPreview(quiet = false) {
@@ -632,7 +633,7 @@ export default class NoteSiteBuilder extends Plugin {
 
 	async openPublished(note: TFile) {
 		const url = await pagesUrl(this.abs(note.parent?.path || ""));
-		if (!url) return new Notice("This note isn't in a git repository with a GitHub remote.");
+		if (!url) return new Notice("This note isn't in a Git repository with a GitHub remote.");
 		this.open(url);
 	}
 
@@ -650,7 +651,7 @@ export default class NoteSiteBuilder extends Plugin {
 	async publish(note: TFile) {
 		const cwd = this.abs(note.parent?.path || "");
 		const top = await git(cwd, "rev-parse", "--show-toplevel");
-		if (!top.ok) return new Notice("This note isn't in a git repository, so there's nothing to push to.");
+		if (!top.ok) return new Notice("This note isn't in a Git repository, so there's nothing to push to.");
 		const repo = fs.realpathSync(top.stdout);
 		const base = fs.realpathSync(this.basePath());
 		const built = await this.build(note, false, true);
@@ -699,7 +700,7 @@ export default class NoteSiteBuilder extends Plugin {
 			initial,
 			preview,
 			folderInRepo: (f) => inRepo(f.isRoot() ? "" : f.path),
-			onSubmit: async (message, selection) => {
+			onSubmit: (message, selection) => void (async () => {
 				this.settings.publishFolders[key] = selection;
 				await this.saveSettings();
 				const progress = new Notice("Publishing…", 0);
@@ -718,7 +719,7 @@ export default class NoteSiteBuilder extends Plugin {
 				progress.hide();
 				const url = await pagesUrl(repo);
 				new Notice(`Pushed.${url ? ` If GitHub Pages is set up, the site updates shortly at\n${url}` : ""}`, 10000);
-			},
+			})(),
 		}).open();
 	}
 }
@@ -765,7 +766,7 @@ class PublishModal extends Modal {
 
 	onOpen() {
 		const { contentEl } = this;
-		this.titleEl.setText("Publish with git");
+		this.titleEl.setText("Publish with Git");
 		this.modalEl.addClass("nsb-publish");
 
 		new Setting(contentEl).setName("What to publish").setHeading();
@@ -781,7 +782,7 @@ class PublishModal extends Modal {
 				if (!this.offered.includes(entry)) this.offered.push(entry);
 				this.selected.add(entry);
 				this.renderFolders();
-				this.refresh();
+				void this.refresh();
 			}).open();
 		}));
 
@@ -802,7 +803,7 @@ class PublishModal extends Modal {
 					this.opts.onSubmit(this.message.trim() || "Update website", [...this.selected]);
 				});
 			});
-		this.refresh();
+		void this.refresh();
 	}
 
 	private renderFolders() {
@@ -818,7 +819,7 @@ class PublishModal extends Modal {
 				.addToggle((t) => t.setValue(this.selected.has(entry)).onChange((on) => {
 					if (on) this.selected.add(entry);
 					else this.selected.delete(entry);
-					this.refresh();
+					void this.refresh();
 				}));
 		}
 	}
@@ -912,7 +913,7 @@ class SettingsTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Publish by default")
-			.setDesc("What Publish with git includes besides the note and its website. You can change it for each note in the Publish dialog, and that choice is remembered.")
+			.setDesc("What Publish with Git includes besides the note and its website. You can change it for each note in the Publish dialog, and that choice is remembered.")
 			.addDropdown((d) => d
 				.addOptions({ site: "Only the note and its website", folder: "The note's whole folder", repo: "The whole repository" })
 				.setValue(s.publishScope)

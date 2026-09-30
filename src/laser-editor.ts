@@ -20,7 +20,7 @@ export const laserPostProcessor: MarkdownPostProcessor = (el) => {
 	}
 	for (const node of hits) {
 		const text = node.nodeValue || "";
-		const frag = document.createDocumentFragment();
+		const frag = createFragment();
 		let last = 0;
 		for (const m of text.matchAll(LASER)) {
 			frag.append(text.slice(last, m.index), laserEl(Number(m[1])));

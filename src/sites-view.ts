@@ -66,7 +66,7 @@ export class SitesView extends ItemView {
 		const link = title.createEl("a", { text: this.plugin.pageTitle(site.home), href: "#" });
 		link.addEventListener("click", (e) => {
 			e.preventDefault();
-			this.app.workspace.getLeaf(false).openFile(site.home);
+			void this.app.workspace.getLeaf(false).openFile(site.home);
 		});
 		title.createSpan({
 			cls: "nsb-site-badge",
@@ -86,7 +86,7 @@ export class SitesView extends ItemView {
 		if (previewing) status.addClass("nsb-site-live");
 
 		const url = card.createDiv({ cls: "nsb-site-meta" });
-		this.publishedUrl(site).then((address) => {
+		void this.publishedUrl(site).then((address) => {
 			if (!address) return;
 			const a = url.createEl("a", { text: address.replace(/^https:\/\//, ""), href: address });
 			a.addEventListener("click", (e) => {
@@ -101,7 +101,7 @@ export class SitesView extends ItemView {
 		this.iconButton(actions, previewing ? "square" : "play", previewing ? "Stop live preview" : "Live preview",
 			() => this.plugin.togglePreview(site.home));
 		this.iconButton(actions, "globe", "Open website", () => this.plugin.openSite(site.home));
-		this.iconButton(actions, "upload-cloud", "Publish with git", () => this.plugin.publish(site.home));
+		this.iconButton(actions, "upload-cloud", "Publish with Git", () => this.plugin.publish(site.home));
 		const folder = site.root ?? site.home.parent;
 		if (folder) this.iconButton(actions, "settings", "Website settings", () => this.plugin.setup(folder));
 	}
