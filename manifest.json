@@ -1,7 +1,7 @@
 {
 	"id": "note-site-builder",
 	"name": "Note Site Builder",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"minAppVersion": "1.7.2",
 	"description": "Turn a note into a clean single-page website and PDF, with a contents rail, numbered figures and live preview.",
 	"author": "daggermaster3000",
