@@ -8,6 +8,7 @@ import * as path from "path";
 import { IMAGE_EXT, render, slugify } from "./render";
 import { printToPdf } from "./pdf";
 import { git, pagesUrl, version } from "./git";
+import { LaserSuggest, laserLivePreview, laserPostProcessor } from "./laser-editor";
 
 interface Settings {
 	outputFolder: string;
@@ -78,6 +79,11 @@ export default class NoteSiteBuilder extends Plugin {
 			menu.addItem((i) => i.setTitle("Build website").setIcon("globe").onClick(() => this.build(file, false)));
 		}));
 		this.registerEvent(this.app.vault.on("modify", (file) => this.onModify(file)));
+
+		// `/laser{488}` shows as a coloured chip in Obsidian too.
+		this.registerMarkdownPostProcessor(laserPostProcessor);
+		this.registerEditorExtension(laserLivePreview);
+		this.registerEditorSuggest(new LaserSuggest(this.app));
 
 		this.addSettingTab(new SettingsTab(this.app, this));
 	}

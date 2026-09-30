@@ -7,6 +7,7 @@
 import { Marked } from "marked";
 import { markedSmartypants } from "marked-smartypants";
 import TEMPLATE from "./template.html";
+import { LASER, laserHtml } from "./laser";
 
 export const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp"]);
 
@@ -208,13 +209,14 @@ class Renderer {
 		return html.replace(/xmathx(\d+)x/g, (_m, n: string) => `\\(${escapeHtml(this.math[Number(n)])}\\)`);
 	}
 
-	/** Obsidian-only inline syntax: comments, highlights, wikilinks. */
+	/** Obsidian-only inline syntax: comments, highlights, lasers, wikilinks. */
 	private obsidianInline(md: string): string {
 		return outsideCode(md, (text) =>
 			text
 				// %% comments %% never reach the page.
 				.replace(/%%[\s\S]*?%%/g, "")
 				.replace(/==(?=\S)([^=\n]+?)==/g, "<mark>$1</mark>")
+				.replace(LASER, (_m, nm: string) => laserHtml(Number(nm)))
 				// [[#Heading]] is an in-page link; links to other notes become plain text,
 				// since only this note is published.
 				.replace(/(?<!!)\[\[([^\]|#]*)(?:#\^?([^\]|]+))?(?:\|([^\]]+))?\]\]/g,

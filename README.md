@@ -65,6 +65,12 @@ notice: "**Draft.** Some sections are still being written."
 
 Without a `title:`, the page is named after the note.
 
+**Laser lines.** `/laser{488}` shows a dot in the colour of the channel that
+line excites, followed by "488 nm", in tables or running text. 405, 488, 561
+and 647 are blue, green, orange and far red; other wavelengths get a blend of
+their neighbours. The chips appear in Obsidian's reading view and live preview
+as well as on the page. Type `/laser` for a list of common lines.
+
 **Keeping things off the page** without deleting them from the note:
 
 - `## Experiment 3 //hidden`: hides the heading and everything under it, down
