@@ -1,6 +1,6 @@
 {
 	"name": "note-site-builder",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"description": "Obsidian plugin: turn a note into a single-page website and PDF.",
 	"main": "main.js",
 	"scripts": {
