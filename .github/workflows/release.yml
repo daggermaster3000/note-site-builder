@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag that matches manifest.json's version (e.g. 0.1.1) to publish it.
+# `npm version patch && git push --follow-tags` publishes a release named after
+# manifest.json's version (e.g. 0.1.1, no "v": Obsidian needs them to match).
 on:
   push:
     tags: ["*"]
@@ -21,4 +22,10 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --generate-notes
+        # If the release was already made by hand, just refresh its files.
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --generate-notes
+          fi
