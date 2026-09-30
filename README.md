@@ -24,7 +24,7 @@ the command palette:
 | Build website and PDF from current note | The same, plus a PDF of the page |
 | Start or stop live preview | Serves the page at `http://localhost:8321` and rebuilds on save |
 | Open built website / Open built PDF | Opens them in your browser or PDF viewer |
-| Publish with git | Shows what changed, asks for a message, then commits and pushes |
+| Publish with git | Lets you pick which folders go along, shows what changed, then commits and pushes |
 | Open published website | Opens `https://<you>.github.io/<repo>/` |
 
 You can also right-click a note in the file explorer and choose **Build website**.
@@ -108,7 +108,16 @@ gets a "to be written" box; you can turn that off in settings.
    ```
 
 4. From then on, **Publish with git** is all it takes. It builds the page,
-   commits the note and its site folder (nothing else), and pushes.
+   commits and pushes.
+
+**Choosing what gets published.** The note and its site are always included.
+The Publish dialog also lists the note's folder and each folder above it, up to
+the top of the repository, and **Add another folder…** takes any other folder
+in the repository. Tick the ones to include; the list of changed files updates
+as you go, so you can see exactly what will be pushed. Each note remembers its
+selection. Settings → *Publish by default* sets the starting point for notes
+without one: only the note and its site, its whole folder, or the whole
+repository.
 
 ## Privacy and what the plugin touches
 

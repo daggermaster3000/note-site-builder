@@ -1,6 +1,6 @@
 import {
-	App, FileSystemAdapter, MarkdownView, Menu, Modal, Notice, Plugin, PluginSettingTab,
-	Setting, TAbstractFile, TFile, normalizePath,
+	App, FileSystemAdapter, FuzzySuggestModal, MarkdownView, Menu, Modal, Notice, Plugin, PluginSettingTab,
+	Setting, TAbstractFile, TFile, TFolder, normalizePath,
 } from "obsidian";
 import * as fs from "fs";
 import * as http from "http";
@@ -16,7 +16,14 @@ interface Settings {
 	pageSize: string;
 	port: number;
 	openAfterBuild: boolean;
+	/** What Publish includes besides the note and its site, unless a note has its own choice. */
+	publishScope: "site" | "folder" | "repo";
+	/** Per note: the extra folders it publishes (vault paths, "" for the vault root, REPO for the whole repository). */
+	publishFolders: Record<string, string[]>;
 }
+
+/** Stands for the whole repository in a publish selection. */
+const REPO = ":repo:";
 
 const DEFAULTS: Settings = {
 	outputFolder: "{{folder}}/{{slug}}-site",
@@ -24,6 +31,8 @@ const DEFAULTS: Settings = {
 	pageSize: "A4",
 	port: 8321,
 	openAfterBuild: false,
+	publishScope: "site",
+	publishFolders: {},
 };
 
 interface Built {
@@ -52,6 +61,7 @@ export default class NoteSiteBuilder extends Plugin {
 
 	async onload() {
 		this.settings = Object.assign({}, DEFAULTS, await this.loadData());
+		this.settings.publishFolders = { ...this.settings.publishFolders };
 
 		this.statusEl = this.addStatusBarItem();
 		this.statusEl.addClass("nsb-status");
@@ -376,30 +386,73 @@ export default class NoteSiteBuilder extends Plugin {
 		const cwd = this.abs(note.parent?.path || "");
 		const top = await git(cwd, "rev-parse", "--show-toplevel");
 		if (!top.ok) return new Notice("This note isn't in a git repository, so there's nothing to push to.");
+		const repo = fs.realpathSync(top.stdout);
+		const base = fs.realpathSync(this.basePath());
 		const built = await this.build(note, false, true);
 		if (!built) return;
 
-		// Only the note and its site are published, never the rest of the repository.
-		const paths = [this.abs(note.path), this.abs(built.folder)].map((p) => path.relative(cwd, p));
-		const status = (await git(cwd, "status", "--porcelain", "--", ...paths)).stdout;
-		const ahead = (await git(cwd, "rev-list", "--count", "@{upstream}..HEAD")).stdout;
-		if (!status && (!ahead || ahead === "0")) return new Notice("Nothing to publish: no changes since the last push.");
+		/** A selection entry as a path git understands, relative to the repository root. */
+		const pathspec = (entry: string) => {
+			if (entry === REPO) return ".";
+			const rel = path.relative(repo, path.join(base, entry));
+			return rel === "" ? "." : rel;
+		};
+		const inRepo = (entry: string) => {
+			const rel = path.relative(repo, path.join(base, entry));
+			return !rel.startsWith("..") && !path.isAbsolute(rel);
+		};
 
-		new PublishModal(this.app, status, async (message) => {
-			const progress = new Notice("Publishing…", 0);
-			const steps: string[][] = status ? [["add", "-A", "--", ...paths], ["commit", "-m", message, "--", ...paths]] : [];
-			steps.push(["push"]);
-			for (const step of steps) {
-				const res = await git(cwd, ...step);
-				if (!res.ok) {
-					progress.hide();
-					console.error("[note-site-builder] git", step.join(" "), res.stderr);
-					return new Notice(`git ${step[0]} failed:\n${(res.stderr || res.stdout).split("\n").slice(-3).join("\n")}`, 15000);
+		// The note's folder and each folder above it, up to the top of the repository.
+		const ancestors: string[] = [];
+		for (let f: TFolder | null = note.parent; f; f = f.parent) {
+			const entry = f.isRoot() ? "" : f.path;
+			if (!inRepo(entry)) break;
+			ancestors.push(entry);
+		}
+		const repoAboveVault = path.relative(repo, base) !== "" && inRepo("");
+		const candidates = [...ancestors, ...(repoAboveVault ? [REPO] : [])];
+
+		const saved = this.settings.publishFolders[note.path];
+		const scope = this.settings.publishScope;
+		const initial = (saved ?? (scope === "folder" ? [ancestors[0]] : scope === "repo" ? [REPO] : []))
+			.filter((e) => e === REPO || inRepo(e));
+
+		// The note and its site are always published; the rest is up to the selection.
+		const always = [path.relative(repo, path.join(base, note.path)), path.relative(repo, path.join(base, built.folder))];
+		const specs = (selection: string[]) => [...new Set([...always, ...selection.map(pathspec)])];
+		const preview = async (selection: string[]) => {
+			const status = (await git(repo, "status", "--porcelain", "--untracked-files=all", "--", ...specs(selection))).stdout;
+			const upstream = await git(repo, "rev-list", "--count", "@{upstream}..HEAD");
+			return { status, ahead: upstream.ok ? Number(upstream.stdout) : 0, hasUpstream: upstream.ok };
+		};
+
+		new PublishModal(this.app, {
+			vaultName: this.app.vault.getName(),
+			repoName: path.basename(repo),
+			candidates,
+			initial,
+			preview,
+			folderInRepo: (f) => inRepo(f.isRoot() ? "" : f.path),
+			onSubmit: async (message, selection) => {
+				this.settings.publishFolders[note.path] = selection;
+				await this.saveSettings();
+				const progress = new Notice("Publishing…", 0);
+				const { status, hasUpstream } = await preview(selection);
+				const paths = specs(selection);
+				const steps: string[][] = status ? [["add", "-A", "--", ...paths], ["commit", "-m", message, "--", ...paths]] : [];
+				steps.push(hasUpstream ? ["push"] : ["push", "--set-upstream", "origin", "HEAD"]);
+				for (const step of steps) {
+					const res = await git(repo, ...step);
+					if (!res.ok) {
+						progress.hide();
+						console.error("[note-site-builder] git", step.join(" "), res.stderr);
+						return new Notice(`git ${step[0]} failed:\n${(res.stderr || res.stdout).split("\n").slice(-3).join("\n")}`, 15000);
+					}
 				}
-			}
-			progress.hide();
-			const url = await pagesUrl(cwd);
-			new Notice(`Pushed.${url ? ` If GitHub Pages is set up, the site updates shortly at\n${url}` : ""}`, 10000);
+				progress.hide();
+				const url = await pagesUrl(repo);
+				new Notice(`Pushed.${url ? ` If GitHub Pages is set up, the site updates shortly at\n${url}` : ""}`, 10000);
+			},
 		}).open();
 	}
 }
@@ -411,38 +464,138 @@ const MIME: Record<string, string> = {
 	".pdf": "application/pdf",
 };
 
+interface PublishOptions {
+	vaultName: string;
+	repoName: string;
+	/** The note's folder and those above it, nearest first; maybe REPO. */
+	candidates: string[];
+	initial: string[];
+	preview: (selection: string[]) => Promise<{ status: string; ahead: number; hasUpstream: boolean }>;
+	folderInRepo: (folder: TFolder) => boolean;
+	onSubmit: (message: string, selection: string[]) => void;
+}
+
 class PublishModal extends Modal {
-	constructor(app: App, private status: string, private onSubmit: (message: string) => void) {
+	private selected: Set<string>;
+	/** Folders on offer: the candidates, then any others added by hand. */
+	private offered: string[];
+	private listEl!: HTMLElement;
+	private changesEl!: HTMLElement;
+	private summaryEl!: HTMLElement;
+	private publishButton: HTMLButtonElement | null = null;
+	private message = "Update website";
+	private request = 0;
+
+	constructor(app: App, private opts: PublishOptions) {
 		super(app);
+		this.selected = new Set(opts.initial);
+		this.offered = [...opts.candidates, ...opts.initial.filter((e) => !opts.candidates.includes(e))];
+	}
+
+	private label(entry: string): string {
+		if (entry === REPO) return `Whole repository (${this.opts.repoName})`;
+		return entry === "" ? `Whole vault (${this.opts.vaultName})` : entry;
 	}
 
 	onOpen() {
 		const { contentEl } = this;
 		this.titleEl.setText("Publish with git");
-		contentEl.createEl("p", {
-			text: this.status
-				? "These changes to the note and its website will be committed and pushed:"
-				: "There are no new edits, but some commits haven't been pushed yet. They will be pushed now.",
+		this.modalEl.addClass("nsb-publish");
+
+		new Setting(contentEl).setName("What to publish").setHeading();
+		new Setting(contentEl)
+			.setName("This note and its website")
+			.setDesc("Always included.")
+			.addToggle((t) => t.setValue(true).setDisabled(true));
+		this.listEl = contentEl.createDiv();
+		this.renderFolders();
+		new Setting(contentEl).addButton((b) => b.setButtonText("Add another folder…").onClick(() => {
+			new FolderPicker(this.app, this.opts.folderInRepo, (folder) => {
+				const entry = folder.isRoot() ? "" : folder.path;
+				if (!this.offered.includes(entry)) this.offered.push(entry);
+				this.selected.add(entry);
+				this.renderFolders();
+				this.refresh();
+			}).open();
+		}));
+
+		this.summaryEl = contentEl.createEl("p");
+		this.changesEl = contentEl.createEl("pre", { cls: "nsb-changes" });
+
+		new Setting(contentEl).setName("Commit message").addText((t) => {
+			t.setValue(this.message).onChange((v) => (this.message = v));
+			t.inputEl.addClass("nsb-wide");
+			window.setTimeout(() => t.inputEl.select(), 0);
 		});
-		if (this.status) contentEl.createEl("pre", { text: this.status, cls: "nsb-changes" });
-		let message = "Update website";
-		if (this.status) {
-			new Setting(contentEl).setName("Commit message").addText((t) => {
-				t.setValue(message).onChange((v) => (message = v));
-				t.inputEl.addClass("nsb-wide");
-				window.setTimeout(() => t.inputEl.select(), 0);
-			});
-		}
 		new Setting(contentEl)
 			.addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
-			.addButton((b) => b.setButtonText("Publish").setCta().onClick(() => {
-				this.close();
-				this.onSubmit(message.trim() || "Update website");
-			}));
+			.addButton((b) => {
+				this.publishButton = b.buttonEl;
+				b.setButtonText("Publish").setCta().onClick(() => {
+					this.close();
+					this.opts.onSubmit(this.message.trim() || "Update website", [...this.selected]);
+				});
+			});
+		this.refresh();
+	}
+
+	private renderFolders() {
+		this.listEl.empty();
+		const nearest = this.opts.candidates[0];
+		for (const entry of this.offered) {
+			const desc = entry === REPO
+				? "Everything in the repository, including files outside this vault."
+				: entry === nearest ? "The note's own folder, and everything in it." : "Everything in this folder.";
+			new Setting(this.listEl)
+				.setName(this.label(entry))
+				.setDesc(desc)
+				.addToggle((t) => t.setValue(this.selected.has(entry)).onChange((on) => {
+					if (on) this.selected.add(entry);
+					else this.selected.delete(entry);
+					this.refresh();
+				}));
+		}
+	}
+
+	/** Show what the current selection would commit; only the latest request counts. */
+	private async refresh() {
+		const ticket = ++this.request;
+		this.summaryEl.setText("Checking for changes…");
+		const { status, ahead } = await this.opts.preview([...this.selected]);
+		if (ticket !== this.request) return;
+		const files = status ? status.split("\n").length : 0;
+		this.summaryEl.setText(
+			files
+				? `${files} changed file${files === 1 ? "" : "s"} will be committed and pushed:`
+				: ahead
+					? `No new edits here, but ${ahead} commit${ahead === 1 ? " hasn't" : "s haven't"} been pushed yet. They will be pushed now.`
+					: "Nothing to publish in this selection: no changes since the last push.",
+		);
+		this.changesEl.setText(status);
+		this.changesEl.toggle(!!status);
+		if (this.publishButton) this.publishButton.disabled = !files && !ahead;
 	}
 
 	onClose() {
+		this.request++;
 		this.contentEl.empty();
+	}
+}
+
+class FolderPicker extends FuzzySuggestModal<TFolder> {
+	constructor(app: App, private allowed: (f: TFolder) => boolean, private onPick: (f: TFolder) => void) {
+		super(app);
+		this.setPlaceholder("Folder to publish…");
+	}
+	getItems(): TFolder[] {
+		return this.app.vault.getAllLoadedFiles()
+			.filter((f): f is TFolder => f instanceof TFolder && this.allowed(f));
+	}
+	getItemText(f: TFolder): string {
+		return f.isRoot() ? "/" : f.path;
+	}
+	onChooseItem(f: TFolder) {
+		this.onPick(f);
 	}
 }
 
@@ -490,6 +643,29 @@ class SettingsTab extends PluginSettingTab {
 					s.pageSize = v;
 					await save();
 				}));
+
+		new Setting(containerEl)
+			.setName("Publish by default")
+			.setDesc("What Publish with git includes besides the note and its website. You can change it for each note in the Publish dialog, and that choice is remembered.")
+			.addDropdown((d) => d
+				.addOptions({ site: "Only the note and its website", folder: "The note's whole folder", repo: "The whole repository" })
+				.setValue(s.publishScope)
+				.onChange(async (v) => {
+					s.publishScope = v as Settings["publishScope"];
+					await save();
+				}));
+
+		const remembered = Object.keys(s.publishFolders).length;
+		if (remembered) {
+			new Setting(containerEl)
+				.setName("Remembered publish choices")
+				.setDesc(`${remembered} note${remembered === 1 ? " has its" : "s have their"} own selection of folders.`)
+				.addButton((b) => b.setButtonText("Forget them").onClick(async () => {
+					s.publishFolders = {};
+					await save();
+					this.display();
+				}));
+		}
 
 		new Setting(containerEl)
 			.setName("Live preview port")
