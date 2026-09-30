@@ -22,6 +22,11 @@ export interface RenderOptions {
 	 */
 	resolveImage: (link: string) => string | null;
 	/**
+	 * Whether an embed is shown as a picture. Defaults to judging by file
+	 * extension; the plugin also counts Excalidraw drawings.
+	 */
+	isImage?: (link: string) => boolean;
+	/**
 	 * Map a link to another note to its page on the site ("other.html"), or
 	 * null when that note isn't published, in which case the link becomes
 	 * plain text. Leave out for a one-page site.
@@ -303,7 +308,7 @@ class Renderer {
 			if (e) {
 				const name = e[1].trim();
 				const pipe = (e[2] || "").trim();
-				if (!IMAGE_EXT.has(extname(name))) {
+				if (!this.isImage(name)) {
 					this.warnings.push(`embed of “${name}” isn't an image, so it was left out`);
 					continue;
 				}
@@ -313,7 +318,7 @@ class Renderer {
 				if (size) width = ` style="width:${size[1]}px"`;
 				else inlineCaption = pipe;
 				src = this.image(name);
-				alt = inlineCaption || name.replace(/\.[^.]+$/, "");
+				alt = inlineCaption || name.split("/").pop()!.replace(/(\.excalidraw)?(\.[^.]+)?$/, "");
 			} else {
 				const img = m as RegExpExecArray;
 				const raw = img[2].trim().replace(/^<|>$/g, "").replace(/\s+"[^"]*"$/, "");
@@ -350,12 +355,16 @@ class Renderer {
 	/** An image embedded mid-sentence stays inline, without a figure. */
 	private inlineEmbeds(line: string): string {
 		return line.replace(/!\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g, (whole, name: string, pipe = "") => {
-			if (!IMAGE_EXT.has(extname(name))) return "";
+			if (!this.isImage(name.trim())) return "";
 			const src = this.image(name.trim());
 			if (src === null) return "";
 			const size = /^(\d+)/.exec(pipe.trim());
 			return `<img src="${escapeHtml(src)}" alt=""${size ? ` width="${size[1]}"` : ""}>`;
 		});
+	}
+
+	private isImage(link: string): boolean {
+		return this.opts.isImage ? this.opts.isImage(link) : IMAGE_EXT.has(extname(link.split("#")[0]));
 	}
 
 	private image(link: string): string | null {

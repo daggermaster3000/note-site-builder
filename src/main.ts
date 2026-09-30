@@ -10,6 +10,8 @@ import { printToPdf } from "./pdf";
 import { git, pagesUrl, version } from "./git";
 import { LaserSuggest, laserLivePreview, laserPostProcessor } from "./laser-editor";
 import { SetupModal } from "./setup";
+import { autoExport, drawingSvg, isDrawing } from "./excalidraw";
+import { SITES_VIEW, SitesView } from "./sites-view";
 
 interface Settings {
 	outputFolder: string;
@@ -69,6 +71,7 @@ export default class NoteSiteBuilder extends Plugin {
 	settings: Settings = DEFAULTS;
 	private statusEl!: HTMLElement;
 	private busy = false;
+	private viewTimer?: number;
 	private preview: {
 		server: http.Server;
 		clients: Set<http.ServerResponse>;
@@ -103,6 +106,8 @@ export default class NoteSiteBuilder extends Plugin {
 		this.addCommand({ id: "open-published", name: "Open published website (GitHub Pages)", checkCallback: withNote((n) => this.openPublished(n)) });
 
 		this.addCommand({ id: "setup", name: "Set up a new website…", callback: () => this.setup() });
+		this.addCommand({ id: "sites", name: "Show all websites", callback: () => this.openSitesPanel() });
+		this.registerView(SITES_VIEW, (leaf) => new SitesView(leaf, this));
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
 			if (file instanceof TFolder) {
@@ -117,6 +122,10 @@ export default class NoteSiteBuilder extends Plugin {
 		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.onVaultChange(file, oldPath)));
 		// Frontmatter such as site-order is only known once Obsidian has indexed it.
 		this.registerEvent(this.app.metadataCache.on("changed", (file) => this.onVaultChange(file)));
+		for (const event of ["create", "delete", "rename"] as const) {
+			this.registerEvent(this.app.vault.on(event as "create", () => this.refreshViews()));
+		}
+		this.registerEvent(this.app.metadataCache.on("changed", () => this.refreshViews()));
 
 		// `/laser{488}` shows as a coloured chip in Obsidian too.
 		this.registerMarkdownPostProcessor(laserPostProcessor);
@@ -200,7 +209,8 @@ export default class NoteSiteBuilder extends Plugin {
 					// Skip the built site, and folders that are sites of their own.
 					if (child.path === folder || this.homeIn(child)) continue;
 					walk(child);
-				} else if (child instanceof TFile && child.extension === "md" && this.frontmatter(child)["site-hide"] !== true) {
+				} else if (child instanceof TFile && child.extension === "md" && !isDrawing(this.app, child) &&
+					this.frontmatter(child)["site-hide"] !== true) {
 					pages.push(child);
 				}
 			}
@@ -215,12 +225,72 @@ export default class NoteSiteBuilder extends Plugin {
 		return { home, root, pages, folder };
 	}
 
-	private pageTitle(note: TFile): string {
+	pageTitle(note: TFile): string {
 		const title = this.frontmatter(note).title;
 		return typeof title === "string" && title.trim() ? title.replace(/[*_`]/g, "").trim() : note.basename;
 	}
 
+	/**
+	 * Every site in the vault: each multi-page site, then each note that is a
+	 * one-page site (it has a site-folder: property, or has been built).
+	 */
+	allSites(): Site[] {
+		const md = this.app.vault.getMarkdownFiles();
+		const homes = md.filter((f) => this.frontmatter(f)["site-home"] === true);
+		const roots = new Set(homes.map((h) => h.parent?.path ?? "/"));
+		const inMulti = (f: TFile) => {
+			for (let d: TFolder | null = f.parent; d; d = d.parent) if (roots.has(d.path)) return true;
+			return false;
+		};
+		const sites: Site[] = homes.map((h) => this.multiSite(h));
+		const outputs = new Set(sites.map((x) => x.folder));
+		for (const note of md) {
+			if (inMulti(note) || isDrawing(this.app, note)) continue;
+			let folder: string;
+			try {
+				folder = this.outputFolder(note);
+			} catch {
+				continue;
+			}
+			const named = typeof this.frontmatter(note)["site-folder"] === "string";
+			if (outputs.has(folder)) continue;
+			if (named || this.app.vault.getAbstractFileByPath(`${folder}/index.html`)) {
+				outputs.add(folder);
+				sites.push({ home: note, root: null, pages: [note], folder });
+			}
+		}
+		return sites.sort((a, b) => this.pageTitle(a.home).localeCompare(this.pageTitle(b.home)));
+	}
+
+	/** The output folder being previewed, if any. */
+	previewFolder(): string | null {
+		return this.preview?.built.folder ?? null;
+	}
+
+	async publishedUrl(note: TFile): Promise<string> {
+		return pagesUrl(this.abs(note.parent?.path || ""));
+	}
+
+	/** Redraw the Websites panel, soon. */
+	refreshViews() {
+		window.clearTimeout(this.viewTimer);
+		this.viewTimer = window.setTimeout(() => {
+			for (const leaf of this.app.workspace.getLeavesOfType(SITES_VIEW)) {
+				if (leaf.view instanceof SitesView) leaf.view.refresh();
+			}
+		}, 300);
+	}
+
+	async openSitesPanel() {
+		const existing = this.app.workspace.getLeavesOfType(SITES_VIEW)[0];
+		const leaf = existing ?? this.app.workspace.getRightLeaf(false);
+		if (!leaf) return;
+		if (!existing) await leaf.setViewState({ type: SITES_VIEW, active: true });
+		this.app.workspace.revealLeaf(leaf);
+	}
+
 	private refreshStatus() {
+		this.refreshViews();
 		if (this.busy) this.statusEl.setText("Building website…");
 		else if (this.preview) this.statusEl.setText(`● Preview :${this.preview.port}`);
 		else this.statusEl.setText("");
@@ -245,6 +315,7 @@ export default class NoteSiteBuilder extends Plugin {
 		item("Open published website", "external-link", () => note && this.openPublished(note), !!note);
 		menu.addSeparator();
 		item("Set up a new website…", "folder-plus", () => this.setup());
+		item("Show all websites", "layout-list", () => this.openSitesPanel());
 		menu.showAtMouseEvent(evt);
 	}
 
@@ -330,20 +401,47 @@ export default class NoteSiteBuilder extends Plugin {
 		const copies = new Map<string, string>(); // source path -> page src
 		const taken = new Set<string>();
 		const sources = new Set<string>(site.pages.map((p) => p.path));
+		const drawings = new Set<string>(); // drawing paths to export as SVG
+		const excalidraw = !!(window as unknown as { ExcalidrawAutomate?: unknown }).ExcalidrawAutomate;
+		const warnings: string[] = [];
+		const explained = new Set<string>(); // links already given a better warning than "missing image"
+		const target = (from: TFile, link: string) => this.app.metadataCache.getFirstLinkpathDest(link.split("#")[0], from.path);
+		const isPicture = (file: TFile) => IMAGE_EXT.has(`.${file.extension.toLowerCase()}`);
 		const imageResolver = (from: TFile) => (link: string): string | null => {
-			const file = this.app.metadataCache.getFirstLinkpathDest(link.split("#")[0], from.path);
-			if (!file || !IMAGE_EXT.has(`.${file.extension.toLowerCase()}`)) return null;
+			let file = target(from, link);
+			if (!file) return null;
+			let drawing = false;
+			if (isDrawing(this.app, file)) {
+				sources.add(file.path);
+				if (excalidraw) drawing = true;
+				else {
+					const exported = autoExport(this.app, file);
+					if (!exported) {
+						explained.add(link);
+						warnings.push(`${from.basename}: “${file.basename}” is an Excalidraw drawing; turn on the Excalidraw plugin (or its auto-export) to include it`);
+						return null;
+					}
+					file = exported;
+				}
+			} else if (!isPicture(file)) return null;
 			sources.add(file.path);
 			let src = copies.get(file.path);
 			if (!src) {
-				const stem = file.basename.replace(/[^\w.-]+/g, "-");
-				let name = `${stem}.${file.extension}`;
-				for (let n = 2; taken.has(name); n++) name = `${stem}-${n}.${file.extension}`;
+				const base = file.basename.replace(/\.excalidraw$/, "").replace(/[^\w.-]+/g, "-");
+				const ext = drawing ? "svg" : file.extension;
+				let name = `${base}.${ext}`;
+				for (let n = 2; taken.has(name); n++) name = `${base}-${n}.${ext}`;
 				taken.add(name);
 				src = `figures/${name}`;
 				copies.set(file.path, src);
+				if (drawing) drawings.add(file.path);
 			}
 			return src;
+		};
+		const isImage = (from: TFile) => (link: string): boolean => {
+			const file = target(from, link);
+			if (!file) return IMAGE_EXT.has((/\.[^./]+$/.exec(link.split("#")[0])?.[0] || "").toLowerCase());
+			return isPicture(file) || isDrawing(this.app, file);
 		};
 		const noteResolver = (from: TFile) => (link: string): string | null => {
 			const file = this.app.metadataCache.getFirstLinkpathDest(link, from.path);
@@ -362,7 +460,6 @@ export default class NoteSiteBuilder extends Plugin {
 		};
 
 		const stamp = await version(this.abs(site.home.parent?.path || ""));
-		const warnings: string[] = [];
 		const pages: [string, string][] = [];
 		for (const page of site.pages) {
 			const { html, pdf } = files.get(page.path)!;
@@ -370,6 +467,7 @@ export default class NoteSiteBuilder extends Plugin {
 				markdown: await this.app.vault.read(page),
 				fallbackTitle: page.basename,
 				resolveImage: imageResolver(page),
+				isImage: isImage(page),
 				resolveNote: multi ? noteResolver(page) : undefined,
 				siteNavHtml: nav(page),
 				placeholders: this.settings.placeholders,
@@ -378,7 +476,9 @@ export default class NoteSiteBuilder extends Plugin {
 				versionHtml: stamp.html,
 				versionText: stamp.text,
 			});
-			warnings.push(...result.warnings.map((w) => (multi ? `${page.basename}: ${w}` : w)));
+			warnings.push(...result.warnings
+				.filter((w) => !explained.has(w.replace(/^missing image: /, "")))
+				.map((w) => (multi ? `${page.basename}: ${w}` : w)));
 			pages.push([html, result.html]);
 		}
 
@@ -389,7 +489,19 @@ export default class NoteSiteBuilder extends Plugin {
 			const file = this.app.vault.getAbstractFileByPath(from);
 			if (!(file instanceof TFile) || from === to) continue;
 			const existing = await adapter.stat(to);
-			if (existing && existing.mtime >= file.stat.mtime && existing.size === file.stat.size) continue;
+			// Read times from disk: Obsidian's cached ones can lag behind a file replaced outside it.
+			const source = (await adapter.stat(from)) ?? file.stat;
+			if (drawings.has(from)) {
+				if (existing && existing.mtime > source.mtime) continue;
+				try {
+					const svg = await drawingSvg(file);
+					if (svg) await adapter.write(to, svg);
+				} catch (err) {
+					warnings.push(`drawing “${file.basename}” couldn't be exported: ${(err as Error).message}`);
+				}
+				continue;
+			}
+			if (existing && existing.mtime >= source.mtime && existing.size === source.size) continue;
 			await adapter.writeBinary(to, await this.app.vault.readBinary(file));
 		}
 		for (const [name, html] of pages) await adapter.write(`${folder}/${name}`, html);
@@ -411,9 +523,13 @@ export default class NoteSiteBuilder extends Plugin {
 
 	// ---------- live preview ----------
 
-	async togglePreview() {
-		if (this.preview) return this.stopPreview();
-		const note = this.activeNote();
+	async togglePreview(target?: TFile) {
+		if (this.preview) {
+			const same = !target || this.siteFor(target).folder === this.preview.built.folder;
+			this.stopPreview();
+			if (same) return;
+		}
+		const note = target ?? this.activeNote();
 		if (!note) return new Notice("Open the note you want to preview first.");
 		const built = await this.build(note, false, true);
 		if (!built) return;

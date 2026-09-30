@@ -31,3 +31,22 @@
 
 .nsb-setup .setting-item { padding-block: var(--size-4-2); }
 .nsb-setup-plan { color: var(--text-muted); font-size: var(--font-ui-small); margin-block: var(--size-4-2); }
+
+/* Websites panel */
+.nsb-sites-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--size-4-2); }
+.nsb-sites-head h4 { margin: 0; }
+.nsb-sites-tools, .nsb-site-actions { display: flex; gap: var(--size-2-1); }
+.nsb-sites-empty { color: var(--text-muted); font-size: var(--font-ui-small); }
+.nsb-site {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: var(--size-4-2) var(--size-4-3);
+	margin-bottom: var(--size-4-2);
+}
+.nsb-site-title { display: flex; align-items: baseline; justify-content: space-between; gap: var(--size-4-2); font-weight: var(--font-semibold); }
+.nsb-site-title a { color: var(--text-normal); text-decoration: none; }
+.nsb-site-title a:hover { text-decoration: underline; }
+.nsb-site-badge { font-size: var(--font-ui-smaller); font-weight: normal; color: var(--text-muted); white-space: nowrap; }
+.nsb-site-meta { font-size: var(--font-ui-smaller); color: var(--text-muted); overflow-wrap: anywhere; }
+.nsb-site-live { color: var(--text-success); }
+.nsb-site-actions { margin-top: var(--size-4-1); margin-left: calc(-1 * var(--size-2-2)); }

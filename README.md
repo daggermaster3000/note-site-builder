@@ -6,6 +6,9 @@ Obsidian as usual; the plugin does the typesetting.
 
 - **Numbered sections and a contents rail** that follows you as you scroll.
 - **Numbered figures with captions**, straight from your image embeds.
+- **Excalidraw drawings** as crisp SVG figures.
+- **A Websites panel** listing every site in your vault, one click from
+  building, previewing and publishing.
 - **Maths** with KaTeX, `$inline$` and `$$display$$`.
 - **A print-ready PDF**, A4 or Letter: each section starts a new page, with a
   running head and page numbers.
@@ -33,6 +36,15 @@ website…*). One dialog asks:
   an empty repository and switch Pages on once in its settings.
 
 Running it again on the same folder updates the settings instead of starting over.
+
+## All your websites in one place
+
+Click the globe in the ribbon and choose **Show all websites**, or run the
+command of that name. A panel opens listing every website in the vault:
+each multi-page site, and every note that has been built or has a
+`site-folder:`. Each entry shows its pages, where it builds to, when it was
+last built, its GitHub Pages address, and buttons to build, build with PDF,
+preview, open, publish, and change its settings.
 
 ## Use
 
@@ -73,6 +85,12 @@ caption is the next line if that line is entirely *italic* or **bold**:
 `|400` sets the display width, as in Obsidian. Other text after the pipe is
 used as the caption. A typed "Figure 3." prefix is dropped, because numbering
 is automatic.
+
+**Excalidraw drawings** embed like images: `![[My diagram.excalidraw|500]]`
+with a caption line under it becomes a numbered figure. The drawing is exported
+as SVG in the light theme when you build, so the Excalidraw plugin needs to be
+on. Without it, an SVG or PNG that Excalidraw auto-exported next to the drawing
+is used instead.
 
 **The masthead** comes from optional properties:
 
