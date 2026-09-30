@@ -21,6 +21,14 @@ export interface RenderOptions {
 	 * or null if it can't be found. Called once per image, in page order.
 	 */
 	resolveImage: (link: string) => string | null;
+	/**
+	 * Map a link to another note to its page on the site ("other.html"), or
+	 * null when that note isn't published, in which case the link becomes
+	 * plain text. Leave out for a one-page site.
+	 */
+	resolveNote?: (link: string) => string | null;
+	/** Links to the site's other pages, shown above the masthead. */
+	siteNavHtml?: string;
 	/** Mark headings with nothing under them as "to be written". */
 	placeholders: boolean;
 	/** File name of the PDF the Download button offers. */
@@ -217,12 +225,23 @@ class Renderer {
 				.replace(/%%[\s\S]*?%%/g, "")
 				.replace(/==(?=\S)([^=\n]+?)==/g, "<mark>$1</mark>")
 				.replace(LASER, (_m, nm: string) => laserHtml(Number(nm)))
-				// [[#Heading]] is an in-page link; links to other notes become plain text,
-				// since only this note is published.
+				// [[#Heading]] is an in-page link. A link to another page of the site
+				// goes to that page; links to notes that aren't published become plain text.
 				.replace(/(?<!!)\[\[([^\]|#]*)(?:#\^?([^\]|]+))?(?:\|([^\]]+))?\]\]/g,
 					(_m, note: string, heading: string | undefined, label: string | undefined) => {
-						if (!note && heading) return `[${(label || heading).trim()}](#${slugify(heading)})`;
-						return (label || (heading ? `${note} › ${heading}` : note)).trim();
+						const anchor = heading ? `#${slugify(heading)}` : "";
+						if (!note.trim() && heading) return `[${(label || heading).trim()}](${anchor})`;
+						const text = (label || (heading ? `${note} › ${heading}` : note)).trim();
+						const href = this.opts.resolveNote?.(note.trim());
+						return href ? `[${text}](${href}${anchor})` : text;
+					})
+				// Markdown-style links to notes, as Obsidian writes them with wikilinks off.
+				.replace(/(?<!!)\[([^\]]*)\]\(<?([^)#>]+?\.md)>?(#[^)]*)?\)/g,
+					(whole, text: string, target: string, hash: string | undefined) => {
+						if (/^[a-z]+:/i.test(target)) return whole;
+						const href = this.opts.resolveNote?.(safeDecode(target).replace(/\.md$/, ""));
+						const anchor = hash ? `#${slugify(safeDecode(hash.slice(1)))}` : "";
+						return href ? `[${text}](${href}${anchor})` : text;
 					}),
 		);
 	}
@@ -465,6 +484,7 @@ class Renderer {
 			"{{TITLE}}": escapeHtml(plainTitle),
 			"{{EYEBROW}}": optional("eyebrow", "p", "eyebrow"),
 			"{{HEADING}}": this.inline(title),
+			"{{SITE_NAV}}": this.opts.siteNavHtml || "",
 			"{{SUBTITLE}}": optional("subtitle", "p", "sub"),
 			"{{NOTICE}}": optional("notice", "p", "notice"),
 			"{{VERSION}}": this.opts.versionHtml || "",

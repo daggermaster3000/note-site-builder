@@ -28,3 +28,6 @@
 .laser-suggestion-note { color: var(--text-muted); font-size: var(--font-ui-smaller); }
 
 .nsb-publish .setting-item { padding-block: var(--size-4-2); }
+
+.nsb-setup .setting-item { padding-block: var(--size-4-2); }
+.nsb-setup-plan { color: var(--text-muted); font-size: var(--font-ui-small); margin-block: var(--size-4-2); }

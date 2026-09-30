@@ -5,10 +5,11 @@ import {
 import * as fs from "fs";
 import * as http from "http";
 import * as path from "path";
-import { IMAGE_EXT, render, slugify } from "./render";
+import { IMAGE_EXT, escapeHtml, render, slugify } from "./render";
 import { printToPdf } from "./pdf";
 import { git, pagesUrl, version } from "./git";
 import { LaserSuggest, laserLivePreview, laserPostProcessor } from "./laser-editor";
+import { SetupModal } from "./setup";
 
 interface Settings {
 	outputFolder: string;
@@ -35,15 +36,32 @@ const DEFAULTS: Settings = {
 	publishFolders: {},
 };
 
-interface Built {
-	note: TFile;
+/**
+ * What gets built. A one-page site is a single note. A multi-page site is a
+ * folder whose home note has `site-home: true`: every note in the folder is
+ * a page, the home note becoming index.html.
+ */
+export interface Site {
+	home: TFile;
+	/** The site's folder, for a multi-page site. */
+	root: TFolder | null;
+	/** Home first, then by `site-order:`, then by path. */
+	pages: TFile[];
 	/** Vault-relative output folder. */
 	folder: string;
-	pdfName: string;
-	/** Files the page embeds, so the preview can rebuild when one changes. */
+}
+
+interface Built {
+	site: Site;
+	folder: string;
+	/** Note path -> its page and PDF, as file names in the output folder. */
+	files: Map<string, { html: string; pdf: string }>;
+	/** Files the pages embed, so the preview can rebuild when one changes. */
 	sources: Set<string>;
 	warnings: string[];
 }
+
+const GENERATOR = '<meta name="generator" content="Note Site Builder for Obsidian">';
 
 const RELOAD = `<script>(function(){var s=new EventSource("/__reload");s.onmessage=function(){location.reload()}})()</script>`;
 
@@ -84,11 +102,21 @@ export default class NoteSiteBuilder extends Plugin {
 		this.addCommand({ id: "publish", name: "Publish with git (commit and push)", checkCallback: withNote((n) => this.publish(n)) });
 		this.addCommand({ id: "open-published", name: "Open published website (GitHub Pages)", checkCallback: withNote((n) => this.openPublished(n)) });
 
+		this.addCommand({ id: "setup", name: "Set up a new website…", callback: () => this.setup() });
+
 		this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
-			if (!(file instanceof TFile) || file.extension !== "md") return;
-			menu.addItem((i) => i.setTitle("Build website").setIcon("globe").onClick(() => this.build(file, false)));
+			if (file instanceof TFolder) {
+				menu.addItem((i) => i.setTitle("Set up website…").setIcon("globe").onClick(() => this.setup(file)));
+			} else if (file instanceof TFile && file.extension === "md") {
+				menu.addItem((i) => i.setTitle("Build website").setIcon("globe").onClick(() => this.build(file, false)));
+			}
 		}));
-		this.registerEvent(this.app.vault.on("modify", (file) => this.onModify(file)));
+		this.registerEvent(this.app.vault.on("modify", (file) => this.onVaultChange(file)));
+		this.registerEvent(this.app.vault.on("create", (file) => this.onVaultChange(file)));
+		this.registerEvent(this.app.vault.on("delete", (file) => this.onVaultChange(file)));
+		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.onVaultChange(file, oldPath)));
+		// Frontmatter such as site-order is only known once Obsidian has indexed it.
+		this.registerEvent(this.app.metadataCache.on("changed", (file) => this.onVaultChange(file)));
 
 		// `/laser{488}` shows as a coloured chip in Obsidian too.
 		this.registerMarkdownPostProcessor(laserPostProcessor);
@@ -113,13 +141,13 @@ export default class NoteSiteBuilder extends Plugin {
 		return file && file.extension === "md" ? file : null;
 	}
 
-	private basePath(): string {
+	basePath(): string {
 		const adapter = this.app.vault.adapter;
 		if (!(adapter instanceof FileSystemAdapter)) throw new Error("This vault isn't on the local disk.");
 		return adapter.getBasePath();
 	}
 
-	private abs(vaultPath: string): string {
+	abs(vaultPath: string): string {
 		return path.join(this.basePath(), vaultPath);
 	}
 
@@ -141,8 +169,55 @@ export default class NoteSiteBuilder extends Plugin {
 		return out;
 	}
 
-	private pdfName(note: TFile): string {
-		return `${slugify(note.basename) || "page"}.pdf`;
+	private frontmatter(note: TFile): Record<string, unknown> {
+		return this.app.metadataCache.getFileCache(note)?.frontmatter ?? {};
+	}
+
+	/** The home note directly inside `folder`, if the folder is a multi-page site. */
+	homeIn(folder: TFolder): TFile | null {
+		for (const child of folder.children) {
+			if (child instanceof TFile && child.extension === "md" && this.frontmatter(child)["site-home"] === true) return child;
+		}
+		return null;
+	}
+
+	/** The site a note belongs to: the nearest folder above it with a home note, else just the note. */
+	siteFor(note: TFile): Site {
+		for (let f: TFolder | null = note.parent; f; f = f.parent) {
+			const home = this.homeIn(f);
+			if (home) return this.multiSite(home);
+		}
+		return { home: note, root: null, pages: [note], folder: this.outputFolder(note) };
+	}
+
+	private multiSite(home: TFile): Site {
+		const root = home.parent as TFolder;
+		const folder = this.outputFolder(home);
+		const pages: TFile[] = [];
+		const walk = (dir: TFolder) => {
+			for (const child of dir.children) {
+				if (child instanceof TFolder) {
+					// Skip the built site, and folders that are sites of their own.
+					if (child.path === folder || this.homeIn(child)) continue;
+					walk(child);
+				} else if (child instanceof TFile && child.extension === "md" && this.frontmatter(child)["site-hide"] !== true) {
+					pages.push(child);
+				}
+			}
+		};
+		walk(root);
+		const order = (f: TFile) => {
+			const n = Number(this.frontmatter(f)["site-order"]);
+			return Number.isFinite(n) ? n : Infinity;
+		};
+		pages.sort((a, b) =>
+			a === home ? -1 : b === home ? 1 : order(a) - order(b) || a.path.localeCompare(b.path, undefined, { numeric: true }));
+		return { home, root, pages, folder };
+	}
+
+	private pageTitle(note: TFile): string {
+		const title = this.frontmatter(note).title;
+		return typeof title === "string" && title.trim() ? title.replace(/[*_`]/g, "").trim() : note.basename;
 	}
 
 	private refreshStatus() {
@@ -150,7 +225,7 @@ export default class NoteSiteBuilder extends Plugin {
 		else if (this.preview) this.statusEl.setText(`● Preview :${this.preview.port}`);
 		else this.statusEl.setText("");
 		this.statusEl.toggle(this.busy || !!this.preview);
-		this.statusEl.setAttr("aria-label", this.preview ? `Previewing “${this.preview.built.note.basename}”` : "");
+		this.statusEl.setAttr("aria-label", this.preview ? `Previewing “${this.preview.built.site.home.basename}”` : "");
 	}
 
 	private showMenu(evt: MouseEvent) {
@@ -168,10 +243,12 @@ export default class NoteSiteBuilder extends Plugin {
 		menu.addSeparator();
 		item("Publish with git…", "upload-cloud", () => note && this.publish(note), !!note);
 		item("Open published website", "external-link", () => note && this.openPublished(note), !!note);
+		menu.addSeparator();
+		item("Set up a new website…", "folder-plus", () => this.setup());
 		menu.showAtMouseEvent(evt);
 	}
 
-	private open(target: string) {
+	open(target: string) {
 		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const { shell } = require("electron");
 		if (/^https?:/.test(target)) shell.openExternal(target);
@@ -180,7 +257,7 @@ export default class NoteSiteBuilder extends Plugin {
 
 	// ---------- building ----------
 
-	/** Build the page (and optionally the PDF). Returns what was built, or null on failure. */
+	/** Build the note's site (and optionally PDFs). Returns what was built, or null on failure. */
 	async build(note: TFile, withPdf: boolean, quiet = false): Promise<Built | null> {
 		if (this.busy) {
 			new Notice("A build is already running.");
@@ -192,25 +269,29 @@ export default class NoteSiteBuilder extends Plugin {
 		try {
 			// Obsidian saves edits on a short delay; write them out first.
 			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-			if (view && view.file === note) await view.save();
-			const built = await this.buildPage(note);
+			if (view?.file) await view.save();
+			const built = await this.buildSite(this.siteFor(note));
 			if (withPdf) {
-				try {
-					await printToPdf(this.abs(path.posix.join(built.folder, "index.html")), this.abs(path.posix.join(built.folder, built.pdfName)));
-				} catch (err) {
-					built.warnings.push(`PDF not made: ${(err as Error).message}`);
+				for (const { html, pdf } of built.files.values()) {
+					try {
+						await printToPdf(this.abs(`${built.folder}/${html}`), this.abs(`${built.folder}/${pdf}`));
+					} catch (err) {
+						built.warnings.push(`PDF of ${html} not made: ${(err as Error).message}`);
+					}
 				}
 			}
 			progress?.hide();
 			if (!quiet) {
 				const w = built.warnings;
+				const n = built.files.size;
 				new Notice(
-					`Built “${note.basename}” into ${built.folder}/` +
+					`Built “${this.pageTitle(built.site.home)}”${n > 1 ? ` (${n} pages)` : ""} into ${built.folder}/` +
 						(w.length ? `\n${w.length} warning(s):\n• ${w.slice(0, 5).join("\n• ")}` : ""),
 					w.length ? 12000 : 4000,
 				);
 				if (w.length) console.warn("[note-site-builder]", w.join("\n"));
-				if (this.settings.openAfterBuild) this.open(this.abs(path.posix.join(built.folder, withPdf ? built.pdfName : "index.html")));
+				const mine = built.files.get(note.path) ?? built.files.get(built.site.home.path)!;
+				if (this.settings.openAfterBuild) this.open(this.abs(`${built.folder}/${withPdf ? mine.pdf : mine.html}`));
 			}
 			return built;
 		} catch (err) {
@@ -224,18 +305,33 @@ export default class NoteSiteBuilder extends Plugin {
 		}
 	}
 
-	private async buildPage(note: TFile): Promise<Built> {
+	private async buildSite(site: Site): Promise<Built> {
 		const adapter = this.app.vault.adapter;
-		const folder = this.outputFolder(note);
-		const figures = `${folder}/figures`;
-		const markdown = await this.app.vault.read(note);
+		const { folder } = site;
+		const multi = site.root !== null;
+
+		// Page file names: the home note is index.html, the rest are named after their notes.
+		const files = new Map<string, { html: string; pdf: string }>();
+		const takenPages = new Set<string>(["index"]);
+		const takenPdfs = new Set<string>();
+		const unique = (taken: Set<string>, stem: string) => {
+			let name = stem;
+			for (let n = 2; taken.has(name); n++) name = `${stem}-${n}`;
+			taken.add(name);
+			return name;
+		};
+		for (const page of site.pages) {
+			const slug = slugify(page.basename) || "page";
+			const html = page === site.home ? "index.html" : `${unique(takenPages, slug)}.html`;
+			files.set(page.path, { html, pdf: `${unique(takenPdfs, slug)}.pdf` });
+		}
 
 		// Each image is copied once, under a name that is safe in a URL.
 		const copies = new Map<string, string>(); // source path -> page src
 		const taken = new Set<string>();
-		const sources = new Set<string>([note.path]);
-		const resolveImage = (link: string): string | null => {
-			const file = this.app.metadataCache.getFirstLinkpathDest(link.split("#")[0], note.path);
+		const sources = new Set<string>(site.pages.map((p) => p.path));
+		const imageResolver = (from: TFile) => (link: string): string | null => {
+			const file = this.app.metadataCache.getFirstLinkpathDest(link.split("#")[0], from.path);
 			if (!file || !IMAGE_EXT.has(`.${file.extension.toLowerCase()}`)) return null;
 			sources.add(file.path);
 			let src = copies.get(file.path);
@@ -249,23 +345,45 @@ export default class NoteSiteBuilder extends Plugin {
 			}
 			return src;
 		};
+		const noteResolver = (from: TFile) => (link: string): string | null => {
+			const file = this.app.metadataCache.getFirstLinkpathDest(link, from.path);
+			return file ? files.get(file.path)?.html ?? null : null;
+		};
 
-		const cwd = this.abs(note.parent?.path || "");
-		const stamp = await version(cwd);
-		const pdfName = this.pdfName(note);
-		const result = render({
-			markdown,
-			fallbackTitle: note.basename,
-			resolveImage,
-			placeholders: this.settings.placeholders,
-			pdfName,
-			pageSize: this.settings.pageSize,
-			versionHtml: stamp.html,
-			versionText: stamp.text,
-		});
+		const nav = (current: TFile) => {
+			if (!multi) return "";
+			const items = site.pages.filter((p) => p !== site.home).map((p) => {
+				const here = p === current ? ' aria-current="page"' : "";
+				return `<li><a href="${files.get(p.path)!.html}"${here}>${escapeHtml(this.pageTitle(p))}</a></li>`;
+			});
+			const home = current === site.home ? ' aria-current="page"' : "";
+			return `<nav class="site-nav" aria-label="Site"><a class="brand" href="index.html"${home}>${escapeHtml(this.pageTitle(site.home))}</a>` +
+				(items.length ? `<ul>${items.join("")}</ul>` : "") + "</nav>";
+		};
+
+		const stamp = await version(this.abs(site.home.parent?.path || ""));
+		const warnings: string[] = [];
+		const pages: [string, string][] = [];
+		for (const page of site.pages) {
+			const { html, pdf } = files.get(page.path)!;
+			const result = render({
+				markdown: await this.app.vault.read(page),
+				fallbackTitle: page.basename,
+				resolveImage: imageResolver(page),
+				resolveNote: multi ? noteResolver(page) : undefined,
+				siteNavHtml: nav(page),
+				placeholders: this.settings.placeholders,
+				pdfName: pdf,
+				pageSize: this.settings.pageSize,
+				versionHtml: stamp.html,
+				versionText: stamp.text,
+			});
+			warnings.push(...result.warnings.map((w) => (multi ? `${page.basename}: ${w}` : w)));
+			pages.push([html, result.html]);
+		}
 
 		if (!(await adapter.exists(folder))) await adapter.mkdir(folder);
-		if (copies.size && !(await adapter.exists(figures))) await adapter.mkdir(figures);
+		if (copies.size && !(await adapter.exists(`${folder}/figures`))) await adapter.mkdir(`${folder}/figures`);
 		for (const [from, src] of copies) {
 			const to = `${folder}/${src}`;
 			const file = this.app.vault.getAbstractFileByPath(from);
@@ -274,8 +392,21 @@ export default class NoteSiteBuilder extends Plugin {
 			if (existing && existing.mtime >= file.stat.mtime && existing.size === file.stat.size) continue;
 			await adapter.writeBinary(to, await this.app.vault.readBinary(file));
 		}
-		await adapter.write(`${folder}/index.html`, result.html);
-		return { note, folder, pdfName, sources, warnings: result.warnings };
+		for (const [name, html] of pages) await adapter.write(`${folder}/${name}`, html);
+
+		// Pages of notes that have since been removed or renamed. Only pages this
+		// plugin wrote are touched.
+		const current = new Set(pages.map(([name]) => name));
+		for (const name of (await adapter.list(folder)).files.map((f) => f.split("/").pop()!)) {
+			if (!name.endsWith(".html") || current.has(name)) continue;
+			const stale = `${folder}/${name}`;
+			if ((await adapter.read(stale)).includes(GENERATOR)) {
+				await adapter.remove(stale);
+				const pdf = stale.replace(/\.html$/, ".pdf");
+				if (await adapter.exists(pdf)) await adapter.remove(pdf);
+			}
+		}
+		return { site, folder, files, sources, warnings };
 	}
 
 	// ---------- live preview ----------
@@ -298,8 +429,8 @@ export default class NoteSiteBuilder extends Plugin {
 				: `Live preview failed: ${err.message}`, 10000);
 		});
 		server.listen(port, "127.0.0.1", () => {
-			new Notice(`Previewing “${note.basename}” at http://localhost:${port}. It reloads each time you save.`);
-			this.open(`http://localhost:${port}/`);
+			new Notice(`Previewing “${this.pageTitle(built.site.home)}” at http://localhost:${port}. It reloads each time you save.`);
+			this.open(`http://localhost:${port}/${built.files.get(note.path)?.html ?? ""}`);
 		});
 		this.preview = { server, clients, built, port };
 		this.refreshStatus();
@@ -330,14 +461,22 @@ export default class NoteSiteBuilder extends Plugin {
 		}
 	}
 
-	private onModify(file: TAbstractFile) {
+	/** Rebuild the previewed site when one of its notes or images changes, or a note is added to it. */
+	private onVaultChange(file: TAbstractFile, oldPath?: string) {
 		const p = this.preview;
-		if (!p || !p.built.sources.has(file.path)) return;
+		if (!p) return;
+		const root = p.built.site.root;
+		const inRoot = (f: string) => !!root && (root.isRoot() || f.startsWith(root.path + "/"));
+		const relevant = p.built.sources.has(file.path) || (oldPath && p.built.sources.has(oldPath)) ||
+			(file instanceof TFile && file.extension === "md" && (inRoot(file.path) || (oldPath !== undefined && inRoot(oldPath))));
+		if (!relevant) return;
 		window.clearTimeout(p.timer);
 		p.timer = window.setTimeout(async () => {
 			if (this.preview !== p) return;
 			try {
-				p.built = await this.buildPage(p.built.note);
+				const home = this.app.vault.getAbstractFileByPath(p.built.site.home.path);
+				if (!(home instanceof TFile)) return;
+				p.built = await this.buildSite(this.siteFor(home));
 				for (const c of p.clients) c.write("data: reload\n\n");
 			} catch (err) {
 				new Notice(`Preview rebuild failed: ${(err as Error).message}`, 8000);
@@ -359,18 +498,19 @@ export default class NoteSiteBuilder extends Plugin {
 	// ---------- opening ----------
 
 	async openSite(note: TFile) {
-		if (this.preview?.built.note === note) return this.open(`http://localhost:${this.preview.port}/`);
-		const page = `${this.outputFolder(note)}/index.html`;
-		if (!(await this.app.vault.adapter.exists(page)) && !(await this.build(note, false))) return;
-		this.open(this.abs(page));
+		const site = this.siteFor(note);
+		const built = await this.build(note, false, true);
+		if (!built) return;
+		const page = built.files.get(note.path)?.html ?? "index.html";
+		if (this.preview?.built.folder === site.folder) return this.open(`http://localhost:${this.preview.port}/${page}`);
+		this.open(this.abs(`${built.folder}/${page}`));
 	}
 
 	async openPdf(note: TFile) {
-		const pdf = `${this.outputFolder(note)}/${this.pdfName(note)}`;
-		if (!(await this.app.vault.adapter.exists(pdf))) {
-			const built = await this.build(note, true);
-			if (!built || !(await this.app.vault.adapter.exists(pdf))) return;
-		}
+		const built = await this.build(note, true, true);
+		if (!built) return;
+		const pdf = `${built.folder}/${(built.files.get(note.path) ?? built.files.get(built.site.home.path))!.pdf}`;
+		if (!(await this.app.vault.adapter.exists(pdf))) return new Notice(`No PDF was made. ${built.warnings.join(" ")}`, 10000);
 		this.open(this.abs(pdf));
 	}
 
@@ -378,6 +518,15 @@ export default class NoteSiteBuilder extends Plugin {
 		const url = await pagesUrl(this.abs(note.parent?.path || ""));
 		if (!url) return new Notice("This note isn't in a git repository with a GitHub remote.");
 		this.open(url);
+	}
+
+	// ---------- setting up ----------
+
+	/** Open the setup wizard for a folder: the given one, else the open note's, else ask. */
+	setup(folder?: TFolder) {
+		const target = folder ?? this.activeNote()?.parent;
+		if (target) return new SetupModal(this.app, this, target).open();
+		new FolderPicker(this.app, () => true, (f) => new SetupModal(this.app, this, f).open()).open();
 	}
 
 	// ---------- publishing ----------
@@ -404,7 +553,7 @@ export default class NoteSiteBuilder extends Plugin {
 
 		// The note's folder and each folder above it, up to the top of the repository.
 		const ancestors: string[] = [];
-		for (let f: TFolder | null = note.parent; f; f = f.parent) {
+		for (let f: TFolder | null = built.site.home.parent; f; f = f.parent) {
 			const entry = f.isRoot() ? "" : f.path;
 			if (!inRepo(entry)) break;
 			ancestors.push(entry);
@@ -412,13 +561,14 @@ export default class NoteSiteBuilder extends Plugin {
 		const repoAboveVault = path.relative(repo, base) !== "" && inRepo("");
 		const candidates = [...ancestors, ...(repoAboveVault ? [REPO] : [])];
 
-		const saved = this.settings.publishFolders[note.path];
+		const key = built.site.home.path;
+		const saved = this.settings.publishFolders[key];
 		const scope = this.settings.publishScope;
 		const initial = (saved ?? (scope === "folder" ? [ancestors[0]] : scope === "repo" ? [REPO] : []))
 			.filter((e) => e === REPO || inRepo(e));
 
 		// The note and its site are always published; the rest is up to the selection.
-		const always = [path.relative(repo, path.join(base, note.path)), path.relative(repo, path.join(base, built.folder))];
+		const always = [...built.site.pages.map((p) => p.path), built.folder].map((p) => path.relative(repo, path.join(base, p)));
 		const specs = (selection: string[]) => [...new Set([...always, ...selection.map(pathspec)])];
 		const preview = async (selection: string[]) => {
 			const status = (await git(repo, "status", "--porcelain", "--untracked-files=all", "--", ...specs(selection))).stdout;
@@ -434,7 +584,7 @@ export default class NoteSiteBuilder extends Plugin {
 			preview,
 			folderInRepo: (f) => inRepo(f.isRoot() ? "" : f.path),
 			onSubmit: async (message, selection) => {
-				this.settings.publishFolders[note.path] = selection;
+				this.settings.publishFolders[key] = selection;
 				await this.saveSettings();
 				const progress = new Notice("Publishing…", 0);
 				const { status, hasUpstream } = await preview(selection);

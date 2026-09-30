@@ -1,17 +1,38 @@
 # Note Site Builder
 
-Turn one Obsidian note into a clean, single-page website and a matching PDF: a
-handout, a course page, a protocol, a report. Write in Obsidian as usual; the
-plugin does the typesetting.
+Turn an Obsidian note, or a whole folder of notes, into a clean website and
+matching PDFs: a handout, a course page, a lab manual, a report. Write in
+Obsidian as usual; the plugin does the typesetting.
 
 - **Numbered sections and a contents rail** that follows you as you scroll.
 - **Numbered figures with captions**, straight from your image embeds.
 - **Maths** with KaTeX, `$inline$` and `$$display$$`.
 - **A print-ready PDF**, A4 or Letter: each section starts a new page, with a
   running head and page numbers.
+- **Several pages from a folder**, with a bar linking them and working
+  `[[links]]` between pages.
 - **Live preview** in your browser that reloads every time you save.
 - **Publish with git**, one click: commit and push the note and its site, for
   example to GitHub Pages.
+
+## Set up a website in one step
+
+Right-click a folder and choose **Set up website…** (or run *Set up a new
+website…*). One dialog asks:
+
+- **One page or several.** One page makes a single note into a page. Several
+  pages makes every note in the folder a page.
+- **Which note is the home page**: an existing one or a new one it creates.
+- **Title, the line above it and a subtitle** for the masthead.
+- **Where the built site goes** (default `site/` inside the folder).
+- **Whether to put it online with GitHub Pages.** If so, it creates a git
+  repository if the folder isn't in one, connects GitHub, adds the Pages
+  workflow and, if you like, publishes straight away. With the
+  [GitHub CLI](https://cli.github.com) signed in, it can create the GitHub
+  repository and switch Pages on for you. Without it, you paste the address of
+  an empty repository and switch Pages on once in its settings.
+
+Running it again on the same folder updates the settings instead of starting over.
 
 ## Use
 
@@ -20,7 +41,8 @@ the command palette:
 
 | Command | What it does |
 | --- | --- |
-| Build website from current note | Writes `index.html` and a `figures/` folder |
+| Set up a new website… | The setup dialog above |
+| Build website from current note | Writes `index.html` (and the other pages) and a `figures/` folder |
 | Build website and PDF from current note | The same, plus a PDF of the page |
 | Start or stop live preview | Serves the page at `http://localhost:8321` and rebuilds on save |
 | Open built website / Open built PDF | Opens them in your browser or PDF viewer |
@@ -70,6 +92,15 @@ line excites, followed by "488 nm", in tables or running text. 405, 488, 561
 and 647 are blue, green, orange and far red; other wavelengths get a blend of
 their neighbours. The chips appear in Obsidian's reading view and live preview
 as well as on the page. Type `/laser` for a list of common lines.
+
+**Several pages.** A folder is a multi-page site when one of its notes has
+`site-home: true` (the setup dialog adds it). That note becomes `index.html`;
+every other note in the folder and its subfolders becomes a page named after
+it, listed in the bar at the top. `site-order: 2` sets a note's place in the
+bar, and `site-hide: true` leaves a note out. `[[Other page]]` and
+`[[Other page#Heading]]` link across pages; links to notes that aren't on the
+site become plain text. Any build or preview command run from any page builds
+the whole site.
 
 **Keeping things off the page** without deleting them from the note:
 
